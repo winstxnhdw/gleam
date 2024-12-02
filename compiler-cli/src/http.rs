@@ -7,7 +7,6 @@ use http::{Request, Response};
 use reqwest::{Certificate, Client};
 
 static REQWEST_CLIENT: OnceLock<Client> = OnceLock::new();
-static CERTS_ENV_VAR: &str = "GLEAM_CACERTS_PATH";
 
 #[derive(Debug)]
 pub struct HttpClient;
@@ -56,7 +55,7 @@ fn init_client() -> Client {
 }
 
 fn get_certificate() -> Result<Certificate, Box<dyn std::error::Error>> {
-    let certificate_path = std::env::var(CERTS_ENV_VAR)?;
+    let certificate_path = std::env::var("GLEAM_CACERTS_PATH")?;
     let certificate_bytes = std::fs::read(&certificate_path)?;
     let certificate = Certificate::from_pem(&certificate_bytes)?;
 
