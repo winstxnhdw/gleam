@@ -1401,6 +1401,17 @@ https://learn.microsoft.com/en-us/windows/apps/get-started/enable-your-device-fo
                 }]
             }
 
+            Error::CannotReadCertificate { path } => {
+                let text = wrap_format!("An error occurred while trying to read the certificate file at: {path}");
+
+                vec![Diagnostic {
+                    title: "Failed to read certificate".into(),
+                    text,
+                    hint: None,
+                    level: Level::Error,
+                    location: None,
+                }]
+            }
 
             Error::FailedToEncrypt { detail } => {
                 let text = wrap_format!("A problem was encountered encrypting data.

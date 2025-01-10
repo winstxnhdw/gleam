@@ -28,7 +28,7 @@ impl gleam_core::io::HttpClient for HttpClient {
             .try_into()
             .expect("Unable to convert HTTP request for use by reqwest library");
         let mut response = REQWEST_CLIENT
-            .get_or_init(init_client)
+            .get_or_init(|| init_client().expect("Unable to create reqwest client"))
             .execute(request)
             .await
             .map_err(Error::http)?;
@@ -44,24 +44,21 @@ impl gleam_core::io::HttpClient for HttpClient {
     }
 }
 
-fn init_client() -> Client {
-    match get_certificate() {
-        Ok(cert) => Client::builder()
-            .add_root_certificate(cert)
-            .build()
-            .expect("Unable to build reqwest client with certificate"),
-        _ => Client::new(),
-    }
-}
-
-fn get_certificate() -> Result<Certificate, Error> {
-    let certificate_path = std::env::var("GLEAM_CACERTS_PATH")?;
-    let certificate_bytes = std::fs::read(&certificate_path)?;
-
-    match Certificate::from_pem(&certificate_bytes) {
-        Ok(certificate) => Ok(certificate),
-        Err(e) => Error::CannotReadCertificate {
+fn init_client() -> Result<Client, Error> {
+    let certificate_path = std::env::var("GLEAM_CACERTS_PATH")
+        .map_err(|_| Error::CannotReadCertificate { path: "".into() })?;
+    let certificate_bytes =
+        std::fs::read(&certificate_path).map_err(|_| Error::CannotReadCertificate {
+            path: certificate_path.clone(),
+        })?;
+    let certificate =
+        Certificate::from_pem(&certificate_bytes).map_err(|_| Error::CannotReadCertificate {
+            path: certificate_path.clone(),
+        })?;
+    Client::builder()
+        .add_root_certificate(certificate)
+        .build()
+        .map_err(|_| Error::CannotReadCertificate {
             path: certificate_path,
-        },
-    }
+        })
 }
