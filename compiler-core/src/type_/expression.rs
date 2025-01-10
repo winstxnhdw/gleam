@@ -168,15 +168,6 @@ pub enum CallKind {
         last_statement_location: SrcSpan,
     },
 }
-impl CallKind {
-    #[must_use]
-    fn is_use_call(&self) -> bool {
-        match self {
-            CallKind::Function => false,
-            CallKind::Use { .. } => true,
-        }
-    }
-}
 
 /// This is used to tell apart regular call arguments and the callback that is
 /// implicitly passed to a `use` function call.
@@ -336,7 +327,15 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
             UntypedExpr::Float {
                 location, value, ..
-            } => Ok(self.infer_float(value, location)),
+            } => {
+                if self.environment.target == Target::Erlang
+                    && !self.current_function_definition.has_erlang_external
+                {
+                    check_erlang_float_safety(&value, location, self.problems)
+                }
+
+                Ok(self.infer_float(value, location))
+            }
 
             UntypedExpr::String {
                 location, value, ..
@@ -431,9 +430,13 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         let type_ = self.new_unbound_var();
 
         // Emit a warning that there is a todo in the code.
+        let warning_location = match kind {
+            TodoKind::Keyword | TodoKind::IncompleteUse | TodoKind::EmptyBlock => location,
+            TodoKind::EmptyFunction { function_location } => function_location,
+        };
         self.problems.warning(Warning::Todo {
             kind,
-            location,
+            location: warning_location,
             type_: type_.clone(),
         });
 
@@ -2224,7 +2227,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                         },
                         module_name: module.name.clone(),
                         value_constructors: module.public_value_names(),
-                        type_with_same_name: false,
+                        type_with_same_name: module.get_public_type(&label).is_some(),
+                        context: ModuleValueUsageContext::ModuleAccess,
                     })?;
 
             // Emit a warning if the value being used is deprecated.
@@ -2433,6 +2437,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 location: record_location,
                 name: RECORD_UPDATE_VARIABLE.into(),
                 type_: record_type.clone(),
+                origin: VariableOrigin::Generated,
             },
             annotation: None,
             kind: AssignmentKind::Generated,
@@ -2785,7 +2790,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                         module_name: module_name.clone(),
                         name: name.clone(),
                         value_constructors: module.public_value_names(),
-                        type_with_same_name: false,
+                        type_with_same_name: module.get_public_type(name).is_some(),
+                        context: ModuleValueUsageContext::ModuleAccess,
                     })?
             }
         };
@@ -2863,7 +2869,13 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
             Constant::Float {
                 location, value, ..
-            } => Ok(Constant::Float { location, value }),
+            } => {
+                if self.environment.target == Target::Erlang {
+                    check_erlang_float_safety(&value, location, self.problems)
+                }
+
+                Ok(Constant::Float { location, value })
+            }
 
             Constant::String {
                 location, value, ..
@@ -3397,7 +3409,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                                 ignored_labelled_args = args
                                     .iter()
                                     .skip_while(|arg| arg.label.is_none())
-                                    .map(|arg| (arg.label.clone(), arg.location))
+                                    .map(|arg| (arg.label.clone(), arg.location, arg.implicit))
                                     .collect_vec();
                                 let args_to_keep = first_labelled_arg.unwrap_or(args.len());
                                 (
@@ -3517,21 +3529,16 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         //
         // So now what we want to do is add back those labelled arguments to
         // make sure the LS can still see that those were explicitly supplied.
-        //
-        // For use calls we've already filled in the gaps with values so we
-        // don't care about adding any label back.
-        if !kind.is_use_call() {
-            for (label, location) in ignored_labelled_args {
-                typed_args.push(CallArg {
-                    label,
-                    value: TypedExpr::Invalid {
-                        location,
-                        type_: self.new_unbound_var(),
-                    },
-                    implicit: None,
+        for (label, location, implicit) in ignored_labelled_args {
+            typed_args.push(CallArg {
+                label,
+                value: TypedExpr::Invalid {
                     location,
-                })
-            }
+                    type_: self.new_unbound_var(),
+                },
+                implicit,
+                location,
+            })
         }
 
         // We don't want to emit a warning for unreachable function call if the
@@ -3652,7 +3659,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                             body_typer.environment.init_usage(
                                 name.clone(),
                                 EntityKind::Variable {
-                                    how_to_ignore: Some(format!("_{name}").into()),
+                                    origin: VariableOrigin::Variable(name.clone()),
                                 },
                                 arg.location,
                                 body_typer.problems,

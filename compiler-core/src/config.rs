@@ -1,3 +1,4 @@
+mod stale_package_remover;
 use crate::error::{FileIoAction, FileKind};
 use crate::io::FileSystemReader;
 use crate::manifest::Manifest;
@@ -10,7 +11,7 @@ use globset::{Glob, GlobSetBuilder};
 use hexpm::version::{self, Version};
 use http::Uri;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{self};
 use std::marker::PhantomData;
 
@@ -136,14 +137,14 @@ where
 impl PackageConfig {
     pub fn dependencies_for(&self, mode: Mode) -> Result<Dependencies> {
         match mode {
-            Mode::Dev | Mode::Lsp => self.all_drect_dependencies(),
+            Mode::Dev | Mode::Lsp => self.all_direct_dependencies(),
             Mode::Prod => Ok(self.dependencies.clone()),
         }
     }
 
     // Return all the dependencies listed in the configuration, that is, all the
     // direct dependencies, both in the `dependencies` and `dev-dependencies`.
-    pub fn all_drect_dependencies(&self) -> Result<Dependencies> {
+    pub fn all_direct_dependencies(&self) -> Result<Dependencies> {
         let mut deps =
             HashMap::with_capacity(self.dependencies.len() + self.dev_dependencies.len());
         for (name, requirement) in self.dependencies.iter().chain(&self.dev_dependencies) {
@@ -184,7 +185,12 @@ impl PackageConfig {
         match manifest {
             None => Ok(HashMap::new()),
             Some(manifest) => {
-                StalePackageRemover::fresh_and_locked(&self.all_drect_dependencies()?, manifest)
+                let requirements = self.all_direct_dependencies()?;
+                let fresh_and_locked = stale_package_remover::StalePackageRemover::fresh_and_locked(
+                    &requirements,
+                    manifest,
+                );
+                Ok(fresh_and_locked)
             }
         }
     }
@@ -237,78 +243,6 @@ impl PackageConfig {
     }
 }
 
-#[derive(Debug)]
-struct StalePackageRemover<'a> {
-    // These are the packages for which the requirement or their parents
-    // requirement has not changed.
-    fresh: HashSet<&'a str>,
-    locked: HashMap<EcoString, &'a Vec<EcoString>>,
-}
-
-impl<'a> StalePackageRemover<'a> {
-    pub fn fresh_and_locked(
-        requirements: &'a HashMap<EcoString, Requirement>,
-        manifest: &'a Manifest,
-    ) -> Result<HashMap<EcoString, Version>> {
-        let locked = manifest
-            .packages
-            .iter()
-            .map(|p| (p.name.clone(), &p.requirements))
-            .collect();
-        Self {
-            fresh: HashSet::new(),
-            locked,
-        }
-        .run(requirements, manifest)
-    }
-
-    fn run(
-        &mut self,
-        requirements: &'a HashMap<EcoString, Requirement>,
-        manifest: &'a Manifest,
-    ) -> Result<HashMap<EcoString, Version>> {
-        // Record all the requirements that have not changed
-        for (name, requirement) in requirements {
-            if manifest.requirements.get(name) != Some(requirement) {
-                continue; // This package has changed, don't record it
-            }
-
-            // Recursively record the package and its deps as being fresh
-            self.record_tree_fresh(name)?;
-        }
-
-        // Return all the previously resolved packages that have not been
-        // recorded as fresh
-        Ok(manifest
-            .packages
-            .iter()
-            .filter(|package| {
-                let new = requirements.contains_key(package.name.as_str())
-                    && !manifest.requirements.contains_key(package.name.as_str());
-                let fresh = self.fresh.contains(package.name.as_str());
-                let locked = !new && fresh;
-                if !locked {
-                    tracing::info!(name = package.name.as_str(), "unlocking_stale_package");
-                }
-                locked
-            })
-            .map(|package| (package.name.clone(), package.version.clone()))
-            .collect())
-    }
-
-    fn record_tree_fresh(&mut self, name: &'a str) -> Result<()> {
-        // Record the top level package
-        let _ = self.fresh.insert(name);
-
-        let deps = self.locked.get(name).ok_or(Error::CorruptManifest)?;
-        // Record each of its deps recursively
-        for package in *deps {
-            self.record_tree_fresh(package)?;
-        }
-        Ok(())
-    }
-}
-
 #[test]
 fn locked_no_manifest() {
     let mut config = PackageConfig::default();
@@ -339,7 +273,7 @@ fn locked_no_changes() {
     ]
     .into();
     let manifest = Manifest {
-        requirements: config.all_drect_dependencies().unwrap(),
+        requirements: config.all_direct_dependencies().unwrap(),
         packages: vec![
             manifest_package("prod1", "1.1.0", &[]),
             manifest_package("prod2", "1.2.0", &[]),
@@ -365,7 +299,7 @@ fn locked_some_removed() {
     config.dependencies = [("prod1".into(), Requirement::hex("~> 1.0"))].into();
     config.dev_dependencies = [("dev2".into(), Requirement::hex("~> 2.0"))].into();
     let manifest = Manifest {
-        requirements: config.all_drect_dependencies().unwrap(),
+        requirements: config.all_direct_dependencies().unwrap(),
         packages: vec![
             manifest_package("prod1", "1.1.0", &[]),
             manifest_package("prod2", "1.2.0", &[]), // Not in config
@@ -932,7 +866,7 @@ mod package_name {
             Ok(name.into())
         } else {
             let error =
-                "Package names may only container lowercase letters, numbers, and underscores";
+                "Package names may only contain lowercase letters, numbers, and underscores";
             Err(serde::de::Error::custom(error))
         }
     }
@@ -947,7 +881,7 @@ name = "one-two"
         toml::from_str::<PackageConfig>(input)
             .unwrap_err()
             .to_string(),
-        "Package names may only container lowercase letters, numbers, and underscores for key `name` at line 1 column 1"
+        "Package names may only contain lowercase letters, numbers, and underscores for key `name` at line 1 column 1"
     )
 }
 
@@ -960,6 +894,6 @@ name = "1"
         toml::from_str::<PackageConfig>(input)
             .unwrap_err()
             .to_string(),
-        "Package names may only container lowercase letters, numbers, and underscores for key `name` at line 1 column 1"
+        "Package names may only contain lowercase letters, numbers, and underscores for key `name` at line 1 column 1"
     )
 }

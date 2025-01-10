@@ -1,6 +1,6 @@
 [package]
 name = "gleam"
-version = "1.6.2"
+version = "1.7.0"
 authors = ["Louis Pilfold <louis@lpil.uk>"]
 edition = "2021"
 license-file = "LICENCE"
@@ -37,6 +37,7 @@ same-file = "1"
 opener = "0"
 # Pubgrub dependency resolution algorithm
 pubgrub = "0"
+
 camino = { workspace = true, features = ["serde1"] }
 async-trait.workspace = true
 base16.workspace = true

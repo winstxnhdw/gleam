@@ -4,209 +4,120 @@
 
 ### Compiler
 
-- Optimised code generated for record updates.
-  ([yoshi](https://github.com/joshi-monster))
-
-- The compiler now allows for record updates to change the generic type
-  parameters of the record:
-
-  ```gleam
-  type Box(value) {
-    Box(password: String, value: value)
-  }
-
-  fn insert(box: Box(a), value: b) -> Box(b) {
-    Box(..box, value:)
-  }
-  ```
-
-  ([yoshi](https://github.com/joshi-monster))
-
-- It is now allowed to write a block with no expressions. Like an empty function
-  body, an empty block is considered incomplete as if it contained a `todo`
-  expression.
+- Improved code generation for blocks in tail position on the Javascript target.
   ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
 
-- The shorthand names for the two targets, `erl` and `js` are now
-  deprecated in code such as `@target`.
-
-  ([Surya Rose](https://github.com/GearsDatapacks))
-
-- A custom panic message can now be specified when asserting a value with `let assert`:
-
-  ```gleam
-  let assert Ok(regex) = regex.compile("ab?c+") as "This regex is always valid"
-  ```
-
-  ([Surya Rose](https://github.com/GearsDatapacks))
-
-- When targeting JavaScript the compiler now generates faster and smaller code
-  for `Int` values in bit array expressions and patterns by evaluating them at
-  compile time where possible.
-  ([Richard Viney](https://github.com/richard-viney))
-
-- Qualified records can now be used in clause guards.
-  ([Surya Rose](https://github.com/GearsDatapacks))
-
-- The compiler now allows deprecating specific custom type variants using the
-  `@deprecated` attribute:
-
-  ```gleam
-  pub type HashAlgorithm {
-    @deprecated("Please upgrade to another algorithm")
-    Md5
-    Sha224
-    Sha512
-  }
-
-  pub fn hash_password(input: String) -> String {
-    hash(input:, algorithm: Md5) // Warning: Deprecated value used
-  }
-  ```
-
-  ([Iesha](https://github.com/wilbert-mad))
+- Function documentation comments and module documentation comments are now
+  included in the generated Erlang code and can be browsed from the Erlang
+  shell starting from OTP27.
+  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
 
 ### Build tool
 
-- Improved the error message you get when trying to add a package that doesn't
-  exist with `gleam add`.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
+- `gleam new` now has refined project name validation - rather than failing on
+  invalid project names, it suggests a valid alternative and prompts for
+  confirmation to use it.
+  ([Diemo Gebhardt](https://github.com/diemogebhardt))
 
-- FFI files (such as `.mjs` and `.erl`) are now permitted in subdirectories of
-  `src/` and `test/`.
-  ([PgBiel](https://github.com/PgBiel))
+### Language server
 
-- `gleam publish` now requires more verbose confirmation for publishing Gleam
-  team packages and v0 packages.
-  ([Louis Pilfold](https://github.com/lpil))
-
-- New projects now require `gleam_stdlib` v0.44.0.
-
-### Language Server
-
-- The language server now provides type information when hovering over argument
-  labels.
-
-  ([Surya Rose](https://github.com/GearsDatapacks))
-
-- The Language Server now suggests a code action to desugar a use expression
-  into the equivalent function call. For example, this snippet of code:
+- The language server can now fill in the labels of any function call, even when
+  only some of the arguments are provided. For example:
 
   ```gleam
+  import gleam/string
+
   pub fn main() {
-    use profile <- result.try(fetch_profile(user))
-    render_welcome(user, profile)
+    string.replace("wibble")
   }
   ```
 
-  Will be turned into:
+  Will be completed to:
 
   ```gleam
+  import gleam/string
+
   pub fn main() {
-    result.try(fetch_profile(user), fn(profile) {
-      render_welcome(user, profile)
-    })
+    string.replace("wibble", each: todo, with: todo)
   }
   ```
 
   ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
 
-- The Language Server now suggests a code action to turn a function call into
-  the equivalent use expression. For example, this snippet of code:
+- The language server now suggests a code action to pattern match on a
+  function's argument. For example:
 
   ```gleam
-  pub fn main() {
-    result.try(fetch_profile(user) fn(profile) {
-      render_welcome(user, profile)
-    })
+  pub type Pokemon {
+    Pokemon(pokedex_number: Int, name: String)
+  }
+
+  pub fn to_string(pokemon: Pokemon) {
+    //             ^ If you put your cursor over the argument
+    todo
   }
   ```
 
-  Will be turned into:
+  Triggering the code action on the `pokemon` argument will generate the
+  following code for you:
 
   ```gleam
-  pub fn main() {
-    use profile <- result.try(fetch_profile(user))
-    render_welcome(user, profile)
+  pub type Pokemon {
+    Pokemon(pokedex_number: Int, name: String)
+  }
+
+  pub fn to_string(pokemon: Pokemon) {
+    let Pokemon(pokedex_number:, name:) = pokemon
+    todo
   }
   ```
 
   ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
 
-- The language server now provides correct information when hovering over
-  patterns in use expressions.
-
-- The language server now suggests a code action to convert an inexhaustive
-  `let` assignment into a `case` expression:
+- The language server now suggests a code action to pattern match on a variable.
+  For example:
 
   ```gleam
-  pub fn unwrap_result(result: Result(a, b)) -> a {
-    let Ok(inner) = result
-    inner
+  pub fn main() {
+    let result = list.first(a_list)
+    //  ^ If you put your cursor over the variable
+    todo
   }
   ```
 
-  Becomes:
+  Triggering the code action on the `result` variable will generate the
+  following code for you:
 
   ```gleam
-  pub fn unwrap_result(result: Result(a, b)) -> a {
-    let inner = case result {
-      Ok(inner) -> inner
-      Error(_) -> todo
+  pub fn main() {
+    let result = list.first(a_list)
+    case result {
+      Ok(value) -> todo
+      Error(value) -> todo
     }
-    inner
+    todo
   }
   ```
 
-  ([Surya Rose](https://github.com/GearsDatapacks))
+  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
 
 ### Formatter
 
-- The formatter now adds a `todo` inside empty blocks.
+### Bug fixes
+
+- Fixed a bug where the "convert from use" code action would generate invalid
+  code for use expressions ending with a trailing comma.
   ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
 
-### Bug fixed
+- Fixed a bug where floats outside of Erlang's floating point range were not
+  causing errors.
+  ([shayan](https://github.com/massivefermion))
 
-- The compiler now throws an error when a float literal ends with an `e` and
-  is missing an exponent.
-  ([Surya Rose](https://github.com/GearsDatapacks))
+- Fixed a bug where build tool could fail to add new dependencies when
+  dependencies with optional dependencies are present in the manifest.
+  ([Louis Pilfold](https://github.com/lpil))
 
-- Fixed a crash with ENOTEMPTY (os error 39) when building on NTFS partitions
-  ([Ivan Ermakov](https://github.com/ivanjermakov))
+- Fixed a bug where a block expression containing a singular record update would
+  produce invalid erlang.
+  ([yoshi](https://github.com/joshi-monster))
 
-- Fixed a bug where the compiler would crash when pattern matching on multiple
-  subjects and one of them being a constant record.
-  ([Surya Rose](https://github.com/GearsDatapacks))
-
-- Variant inference on prelude types now works correctly if the variant is constant.
-  ([Surya Rose](https://github.com/GearsDatapacks))
-
-- Fixed a bug where patterns in `use` expressions would not be checked to ensure that
-  they were exhaustive.
-  ([Surya Rose](https://github.com/GearsDatapacks))
-
-- Fixed a bug where a `module.mjs` file would be overwritten by a `module.gleam`
-  file of same name without warning. It now produces an error.
-  ([PgBiel](https://github.com/PgBiel))
-
-- Modules depending on removed or renamed modules now get automatically recompiled.
-  ([Sakari Bergen](https://github.com/sbergen))
-
-- The compiler now raises a warning for unused case expressions, code blocks and
-  pipelines that would be safe to remove.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
- - Fixed a bug where assigning the prefix of a string pattern to a variable
-   nested inside another pattern would produce invalid code on Javascript.
-   ([yoshi](https://github.com/joshi-monster))
-
-- Fixed a bug where expressions which use an unsafe integer on JavaScript would
-  not emit a warning if an @external function had been referenced.
-  ([Richard Viney](https://github.com/richard-viney))
-
-## v1.6.1 - 2024-11-19
-
-### Bug fixed
-
-- Fixed a bug where `gleam update` would fail to update versions.
-  ([Jason Sipula](https://github.com/SnakeDoc))

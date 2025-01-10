@@ -375,7 +375,7 @@ A block must always contain at least one expression.",
                             );
                             "Incomplete block"
                         }
-                        TodoKind::EmptyFunction => "Unimplemented function",
+                        TodoKind::EmptyFunction { .. } => "Unimplemented function",
                         TodoKind::IncompleteUse => {
                             text.push_str(
                                 "
@@ -630,15 +630,10 @@ Hint: You can safely remove it.
                     }),
                 },
 
-                type_::Warning::UnusedVariable {
-                    location,
-                    how_to_ignore,
-                } => Diagnostic {
+                type_::Warning::UnusedVariable { location, origin } => Diagnostic {
                     title: "Unused variable".into(),
                     text: "".into(),
-                    hint: how_to_ignore.as_ref().map(|rewrite_as| {
-                        format!("You can ignore it with an underscore: `{rewrite_as}`.")
-                    }),
+                    hint: origin.how_to_ignore(),
                     level: diagnostic::Level::Warning,
                     location: Some(Location {
                         src: src.clone(),

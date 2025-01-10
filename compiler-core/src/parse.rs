@@ -68,6 +68,7 @@ use crate::ast::{
 use crate::build::Target;
 use crate::error::wrap;
 use crate::parse::extra::ModuleExtra;
+use crate::type_::error::VariableOrigin;
 use crate::type_::expression::Implementations;
 use crate::type_::Deprecation;
 use crate::warning::{DeprecatedSyntaxWarning, WarningEmitter};
@@ -1123,6 +1124,7 @@ where
                             )
                         }
                         _ => Pattern::Variable {
+                            origin: VariableOrigin::Variable(name.clone()),
                             location: SrcSpan { start, end },
                             name,
                             type_: (),
@@ -1777,6 +1779,7 @@ where
                         location: SrcSpan { start, end },
                         label: Some(name.clone()),
                         value: UntypedPattern::Variable {
+                            origin: VariableOrigin::LabelShorthand(name.clone()),
                             name,
                             location: SrcSpan { start, end },
                             type_: (),
@@ -1879,23 +1882,28 @@ where
         let return_annotation = self.parse_type_annotation(&Token::RArrow)?;
 
         let (body, end, end_position) = match self.maybe_one(&Token::LeftBrace) {
-            Some(_) => {
+            Some((left_brace_start, _)) => {
                 let some_body = self.parse_statement_seq()?;
-                let (_, rbr_e) = self.expect_one(&Token::RightBrace)?;
+                let (_, right_brace_end) = self.expect_one(&Token::RightBrace)?;
                 let end = return_annotation
                     .as_ref()
                     .map(|l| l.location().end)
                     .unwrap_or(rpar_e);
                 let body = match some_body {
                     None => vec1![Statement::Expression(UntypedExpr::Todo {
-                        kind: TodoKind::EmptyFunction,
-                        location: SrcSpan { start, end },
+                        kind: TodoKind::EmptyFunction {
+                            function_location: SrcSpan { start, end }
+                        },
+                        location: SrcSpan {
+                            start: left_brace_start + 1,
+                            end: right_brace_end
+                        },
                         message: None,
                     })],
                     Some((body, _)) => body,
                 };
 
-                (body, end, rbr_e)
+                (body, end, right_brace_end)
             }
 
             None if is_anon => {

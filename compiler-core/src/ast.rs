@@ -14,6 +14,7 @@ pub use self::constant::{Constant, TypedConstant, UntypedConstant};
 use crate::analyse::Inferred;
 use crate::build::{Located, Target};
 use crate::parse::SpannedString;
+use crate::type_::error::VariableOrigin;
 use crate::type_::expression::Implementations;
 use crate::type_::printer::Names;
 use crate::type_::{
@@ -728,6 +729,7 @@ pub struct ModuleConstant<T, ConstantRecordTag> {
 }
 
 pub type UntypedCustomType = CustomType<()>;
+pub type TypedCustomType = CustomType<Arc<Type>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A newly defined type with one or more constructors.
@@ -1229,6 +1231,14 @@ impl<A> CallArg<A> {
     pub fn is_implicit(&self) -> bool {
         self.implicit.is_some()
     }
+
+    #[must_use]
+    pub fn is_use_implicit_callback(&self) -> bool {
+        match self.implicit {
+            Some(ImplicitCallArgOrigin::Use | ImplicitCallArgOrigin::IncorrectArityUse) => true,
+            Some(_) | None => false,
+        }
+    }
 }
 
 impl CallArg<TypedExpr> {
@@ -1321,6 +1331,12 @@ impl UntypedRecordUpdateArg {
     #[must_use]
     pub fn uses_label_shorthand(&self) -> bool {
         self.value.location() == self.location
+    }
+}
+
+impl HasLocation for UntypedRecordUpdateArg {
+    fn location(&self) -> SrcSpan {
+        self.location
     }
 }
 
@@ -1705,6 +1721,7 @@ pub enum Pattern<Type> {
         location: SrcSpan,
         name: EcoString,
         type_: Type,
+        origin: VariableOrigin,
     },
 
     /// A reference to a variable in a bit array. This is always a variable
@@ -2163,7 +2180,7 @@ impl<A> BitArrayOption<A> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TodoKind {
     Keyword,
-    EmptyFunction,
+    EmptyFunction { function_location: SrcSpan },
     IncompleteUse,
     EmptyBlock,
 }
@@ -2360,13 +2377,6 @@ impl TypedStatement {
         }
     }
 
-    pub fn is_non_pipe_expression(&self) -> bool {
-        match self {
-            Statement::Expression(expression) => !expression.is_pipeline(),
-            _ => false,
-        }
-    }
-
     pub fn location(&self) -> SrcSpan {
         match self {
             Statement::Expression(expression) => expression.location(),
@@ -2457,6 +2467,48 @@ impl TypedAssignment {
             }
         }
         self.pattern
+            .find_node(byte_index)
+            .or_else(|| self.value.find_node(byte_index))
+    }
+
+    pub fn type_(&self) -> Arc<Type> {
+        self.value.type_()
+    }
+}
+
+/// A pipeline is desugared to a series of assignments:
+///
+/// ```gleam
+/// wibble |> wobble |> woo
+/// ```
+///
+/// Becomes:
+///
+/// ```erl
+/// Pipe1 = wibble
+/// Pipe2 = wobble(Pipe1)
+/// woo(Pipe2)
+/// ```
+///
+/// This represents one of such assignments once the pipeline has been desugared
+/// and each step has been typed.
+///
+/// > We're not using a more general `TypedAssignment` node since that has much
+/// > more informations to carry around. This one is limited since we know it
+/// > will always be in the form `VarName = <Expr>`, with no patterns on the
+/// > left hand side of the assignment.
+/// > Being more constrained simplifies code generation for pipelines!
+///
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedPipelineAssignment {
+    pub location: SrcSpan,
+    pub name: EcoString,
+    pub value: Box<TypedExpr>,
+}
+
+impl TypedPipelineAssignment {
+    pub fn find_node(&self, byte_index: u32) -> Option<Located<'_>> {
+        self.value
             .find_node(byte_index)
             .or_else(|| self.value.find_node(byte_index))
     }

@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use crate::build::{Outcome, Runtime, Target};
 use crate::diagnostic::{Diagnostic, ExtraLabel, Label, Location};
-use crate::type_::collapse_links;
 use crate::type_::error::{
-    MissingAnnotation, Named, UnknownField, UnknownTypeHint, UnsafeRecordUpdateReason,
+    MissingAnnotation, ModuleValueUsageContext, Named, UnknownField, UnknownTypeHint,
+    UnsafeRecordUpdateReason,
 };
 use crate::type_::printer::{Names, Printer};
 use crate::type_::{error::PatternMatchKind, FieldAccessUsage};
@@ -18,11 +18,9 @@ use pubgrub::report::DerivationTree;
 use pubgrub::version::Version;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::env;
 use std::fmt::{Debug, Display};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 use termcolor::Buffer;
 use thiserror::Error;
 use vec1::Vec1;
@@ -32,6 +30,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 pub type Name = EcoString;
 
 pub type Result<Ok, Err = Error> = std::result::Result<Ok, Err>;
+
+#[cfg(test)]
+pub mod tests;
 
 macro_rules! wrap_format {
     ($($tts:tt)*) => {
@@ -150,7 +151,7 @@ pub enum Error {
     Gzip(String),
 
     #[error("shell program `{program}` not found")]
-    ShellProgramNotFound { program: String },
+    ShellProgramNotFound { program: String, os: OS },
 
     #[error("shell program `{program}` failed")]
     ShellCommand {
@@ -313,6 +314,12 @@ file_names.iter().map(|x| x.as_str()).join(", "))]
 
     #[error("The certificate at {path} could not be read")]
     CannotReadCertificate { path: String },
+
+    #[error("Failed to encrypt data")]
+    FailedToEncrypt { detail: String },
+
+    #[error("Failed to decrypt data")]
+    FailedToDecrypt { detail: String },
 }
 
 /// This is to make clippy happy and not make the error variant too big by
@@ -340,6 +347,37 @@ impl SmallVersion {
             minor: version.minor as u8,
             patch: version.patch as u8,
         }
+    }
+}
+#[derive(Debug, Clone, Eq, PartialEq, Copy)]
+pub enum OS {
+    Linux(Distro),
+    MacOS,
+    Windows,
+    Other,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Copy)]
+pub enum Distro {
+    Ubuntu,
+    Debian,
+    Other,
+}
+
+pub fn parse_os(os: &str, distro: &str) -> OS {
+    match os {
+        "macos" => OS::MacOS,
+        "windows" => OS::Windows,
+        "linux" => OS::Linux(parse_linux_distribution(distro)),
+        _ => OS::Other,
+    }
+}
+
+pub fn parse_linux_distribution(distro: &str) -> Distro {
+    match distro {
+        "ubuntu" => Distro::Ubuntu,
+        "debian" => Distro::Debian,
+        _ => Distro::Other,
     }
 }
 
@@ -489,11 +527,58 @@ impl From<capnp::NotInSchema> for Error {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum InvalidProjectNameReason {
     Format,
+    FormatNotLowercase,
     GleamPrefix,
     ErlangReservedWord,
     ErlangStandardLibraryModule,
     GleamReservedWord,
     GleamReservedModule,
+}
+
+pub fn format_invalid_project_name_error(
+    name: &str,
+    reason: &InvalidProjectNameReason,
+    with_suggestion: &Option<String>,
+) -> String {
+    let reason_message = match reason {
+        InvalidProjectNameReason::ErlangReservedWord => "is a reserved word in Erlang.",
+        InvalidProjectNameReason::ErlangStandardLibraryModule => {
+            "is a standard library module in Erlang."
+        }
+        InvalidProjectNameReason::GleamReservedWord => "is a reserved word in Gleam.",
+        InvalidProjectNameReason::GleamReservedModule => "is a reserved module name in Gleam.",
+        InvalidProjectNameReason::FormatNotLowercase => {
+            "does not have the correct format. Project names \
+may only contain lowercase letters."
+        }
+        InvalidProjectNameReason::Format => {
+            "does not have the correct format. Project names \
+must start with a lowercase letter and may only contain lowercase letters, \
+numbers and underscores."
+        }
+        InvalidProjectNameReason::GleamPrefix => {
+            "has the reserved prefix `gleam_`. \
+This prefix is intended for official Gleam packages only."
+        }
+    };
+
+    match with_suggestion {
+        Some(suggested_name) => wrap_format!(
+            "We were not able to create your project as `{}` {}
+
+Would you like to name your project '{}' instead?",
+            name,
+            reason_message,
+            suggested_name
+        ),
+        None => wrap_format!(
+            "We were not able to create your project as `{}` {}
+
+Please try again with a different project name.",
+            name,
+            reason_message
+        ),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -787,29 +872,7 @@ of the Gleam dependency modules."
             }
 
             Error::InvalidProjectName { name, reason } => {
-                let text = wrap_format!(
-                    "We were not able to create your project as `{}` {}
-
-Please try again with a different project name.",
-                    name,
-                    match reason {
-                        InvalidProjectNameReason::ErlangReservedWord =>
-                            "is a reserved word in Erlang.",
-                        InvalidProjectNameReason::ErlangStandardLibraryModule =>
-                            "is a standard library module in Erlang.",
-                        InvalidProjectNameReason::GleamReservedWord =>
-                            "is a reserved word in Gleam.",
-                        InvalidProjectNameReason::GleamReservedModule =>
-                            "is a reserved module name in Gleam.",
-                        InvalidProjectNameReason::Format =>
-                            "does not have the correct format. Project names \
-must start with a lowercase letter and may only contain lowercase letters, \
-numbers and underscores.",
-                        InvalidProjectNameReason::GleamPrefix =>
-                            "has the reserved prefix `gleam_`. \
-This prefix is intended for official Gleam packages only.",
-                    }
-                );
+                let text = format_invalid_project_name_error(name, reason, &None);
 
                 vec![Diagnostic {
                     title: "Invalid project name".into(),
@@ -1016,8 +1079,44 @@ your app.src file \"{app_ver}\"."
                 }]
             }
 
-            Error::ShellProgramNotFound { program } => {
+            Error::ShellProgramNotFound { program , os } => {
                 let mut text = format!("The program `{program}` was not found. Is it installed?");
+
+                match os {
+                    OS::MacOS => {
+                        fn brew_install(name: &str, pkg: &str) -> String {
+                            format!("\n\nYou can install {} via homebrew: brew install {}", name, pkg)
+                        }
+                        match program.as_str() {
+                            "erl" | "erlc" | "escript" => text.push_str(&brew_install("Erlang", "erlang")),
+                            "rebar3" => text.push_str(&brew_install("Rebar3", "rebar3")),
+                            "deno" => text.push_str(&brew_install("Deno", "deno")),
+                            "elixir" => text.push_str(&brew_install("Elixir", "elixir")),
+                            "node" => text.push_str(&brew_install("Node.js", "node")),
+                            "bun" => text.push_str(&brew_install("Bun", "oven-sh/bun/bun")),
+                            "git" => text.push_str(&brew_install("Git", "git")),
+                            _ => (),
+                        }
+                    }
+                    OS::Linux(distro) => {
+                        fn apt_install(name: &str, pkg: &str) -> String {
+                            format!("\n\nYou can install {} via apt: sudo apt install {}", name, pkg)
+                        }
+                        match distro {
+                            Distro::Ubuntu | Distro::Debian => {
+                                match program.as_str() {
+                                    "elixir" => text.push_str(&apt_install("Elixir", "elixir")),
+                                    "git" => text.push_str(&apt_install("Git", "git")),
+                                    _ => (),
+                                }
+                            }
+                            Distro::Other => (),
+                        }
+                    }
+                    _ => (),
+                }
+
+                text.push('\n');
 
                 match program.as_str() {
                     "erl" | "erlc" | "escript" => text.push_str(
@@ -1027,23 +1126,36 @@ https://gleam.run/getting-started/installing/",
                     ),
                     "rebar3" => text.push_str(
                         "
-Documentation for installing rebar3 can be viewed here:
-https://gleam.run/getting-started/installing/",
+Documentation for installing Rebar3 can be viewed here:
+https://rebar3.org/docs/getting-started/",
+                    ),
+                    "deno" => text.push_str(
+                        "
+Documentation for installing Deno can be viewed here:
+https://docs.deno.com/runtime/getting_started/installation/",
+                    ),
+                    "elixir" => text.push_str(
+                        "
+Documentation for installing Elixir can be viewed here:
+https://elixir-lang.org/install.html",
+                    ),
+                    "node" => text.push_str(
+                        "
+Documentation for installing Node.js via package manager can be viewed here:
+https://nodejs.org/en/download/package-manager/all/",
+                    ),
+                    "bun" => text.push_str(
+                        "
+Documentation for installing Bun can be viewed here:
+https://bun.sh/docs/installation/",
+                    ),
+                    "git" => text.push_str(
+                        "
+Documentation for installing Git can be viewed here:
+https://git-scm.com/book/en/v2/Getting-Started-Installing-Git",
                     ),
                     _ => (),
                 }
-                match (program.as_str(), env::consts::OS) {
-                    // TODO: Further suggestions for other OSes?
-                    ("erl" | "erlc" | "escript", "macos") => text.push_str(
-                        "
-You can also install Erlang via homebrew using \"brew install erlang\"",
-                    ),
-                    ("rebar3", "macos") => text.push_str(
-                        "
-You can also install rebar3 via homebrew using \"brew install rebar3\"",
-                    ),
-                    _ => (),
-                };
 
                 vec![Diagnostic {
                     title: "Program not found".into(),
@@ -1289,6 +1401,37 @@ https://learn.microsoft.com/en-us/windows/apps/get-started/enable-your-device-fo
                 }]
             }
 
+
+            Error::FailedToEncrypt { detail } => {
+                let text = wrap_format!("A problem was encountered encrypting data.
+The error from the encryption library was:
+
+    {detail}"
+);
+                vec![Diagnostic {
+                    title: "Failed to encrypt data".into(),
+                    text,
+                    hint: None,
+                    level: Level::Error,
+                    location: None,
+                }]
+            }
+
+            Error::FailedToDecrypt { detail } => {
+                let text = wrap_format!("A problem was encountered decrypting data.
+The error from the encryption library was:
+
+    {detail}"
+);
+                vec![Diagnostic {
+                    title: "Failed to decrypt data".into(),
+                    text,
+                    hint: None,
+                    level: Level::Error,
+                    location: None,
+                }]
+            }
+
             Error::NonUtf8Path { path } => {
                 let text = format!(
                     "Encountered a non UTF-8 path '{}', but only UTF-8 paths are supported.",
@@ -1322,6 +1465,27 @@ https://learn.microsoft.com/en-us/windows/apps/get-started/enable-your-device-fo
                 .iter()
                 .map(|error| {
                     match error {
+                TypeError::ErlangFloatUnsafe {
+                     location,  ..
+                } => Diagnostic {
+                        title: "Float is outside Erlang's floating point range".into(),
+                        text: wrap("This float value is too large to be represented by \
+Erlang's floating point type. To avoid this error float values must be in the range \
+-1.7976931348623157e308 - 1.7976931348623157e308."),
+                    hint: None,
+                    level: Level::Error,
+                    location: Some(Location {
+                        label: Label {
+                            text: None,
+                                span: *location,
+                            },
+                        path: path.clone(),
+                        src: src.clone(),
+                        extra_labels: vec![],
+                    }),
+                },
+
+
                 TypeError::SrcImportingTest {
                     location,
                     src_module,
@@ -1666,7 +1830,8 @@ Hint: Add some type annotations and try again.")
                         if variants == &UnknownField::NoFields {
                             text.push_str("\nIt does not have any fields.");
                         } else {
-                            text.push_str("\nIt does not have any fields shared by all variants.");
+                            text.push_str("\nIt does not have fields that are common \
+across all variants.");
                         }
                     } else {
                         text.push_str("\nIt has these accessible fields:\n");
@@ -1679,21 +1844,19 @@ Hint: Add some type annotations and try again.")
                     match variants {
                         UnknownField::AppearsInAVariant => {
                             let msg = wrap(
-                                "Note: The field you are trying to \
-access might not be consistently present or positioned across the custom \
-type's variants, preventing reliable access. Ensure the field exists in the \
-same position and has the same type in all variants, or pattern matching on it \
-to enable direct accessor syntax.",
+                                "Note: The field you are trying to access is \
+not defined consistently across all variants of this custom type. To fix this, \
+ensure that all variants include the field with the same name, position, and \
+type.",
                             );
                             text.push_str("\n\n");
                             text.push_str(&msg);
                         }
                         UnknownField::AppearsInAnImpossibleVariant => {
                             let msg = wrap(
-                                "Note: The field you are trying to \
-access exists, but not on the variant which this value always is. \
-A field that is not present in all variants can only be accessed when \
-the value is inferred to be one variant.",
+                                "Note: The field exists in this custom type \
+but is not defined for the current variant. Ensure that you are accessing the \
+field on a variant where it is valid.",
                             );
                             text.push_str("\n\n");
                             text.push_str(&msg);
@@ -1835,7 +1998,6 @@ But function expects:
                     situation,
                 } => {
                     let mut printer = Printer::new(names);
-                    let hint = hint_unwrap_result(expected, given, &mut printer);
                     let mut text = if let Some(description) = situation.as_ref().and_then(|s| s.description()) {
                         let mut text = description.to_string();
                         text.push('\n');
@@ -1848,13 +2010,10 @@ But function expects:
                     text.push_str(&printer.print_type(expected));
                     text.push_str("\n\nFound type:\n\n    ");
                     text.push_str(&printer.print_type(given));
-                    if hint.is_some() {
-                        text.push('\n');
-                    }
                     Diagnostic {
                         title: "Type mismatch".into(),
                         text,
-                        hint,
+                        hint: None,
                         level: Level::Error,
                         location: Some(Location {
                             label: Label {
@@ -2199,11 +2358,17 @@ Private types can only be used within the module that defines them.",
                     module_name,
                     value_constructors,
                     type_with_same_name: imported_value_as_type,
+                    context,
                 } => {
                     let text = if *imported_value_as_type {
-                        format!("`{name}` is only a type, it cannot be imported as a value.")
+                        match context {
+                            ModuleValueUsageContext::UnqualifiedImport =>
+                                wrap_format!("`{name}` is only a type, it cannot be imported as a value."),
+                            ModuleValueUsageContext::ModuleAccess =>
+                                wrap_format!("{module_name}.{name} is a type constructor, it cannot be used as a value"),
+                        }
                     } else {
-                        format!("The module `{module_name}` does not have a `{name}` value.")
+                        wrap_format!("The module `{module_name}` does not have a `{name}` value.")
                     };
                     Diagnostic {
                         title: "Unknown module value".into(),
@@ -2212,7 +2377,7 @@ Private types can only be used within the module that defines them.",
                         level: Level::Error,
                         location: Some(Location {
                             label: Label {
-                                text: if *imported_value_as_type {
+                                text: if *imported_value_as_type && matches!(context, ModuleValueUsageContext::UnqualifiedImport) {
                                     Some(format!("Did you mean `type {name}`?"))
                                 } else {
                                     did_you_mean(name, value_constructors)
@@ -3087,7 +3252,7 @@ and the final one is the `use` callback function.\n"));
                         }
                     } else {
                         text.push_str("All the arguments have already been supplied, \
-so it cannot take the the `use` callback function as a final argument.\n")
+so it cannot take the `use` callback function as a final argument.\n")
                     };
 
                     text.push_str("\nSee: https://tour.gleam.run/advanced-features/use/");
@@ -3758,7 +3923,7 @@ or you can publish it using a different version number"),
                 level: Level::Error,
                 location: None,
                 hint: Some("Please add the --replace flag if you want to replace the release.".into()),
-            }],
+            }]
         }
     }
 }
@@ -3829,31 +3994,6 @@ fn hint_alternative_operator(op: &BinOp, given: &Type) -> Option<String> {
         BinOp::AddFloat if given.is_string() => Some(hint_string_message()),
 
         _ => None,
-    }
-}
-
-fn hint_unwrap_result(
-    expected: &Arc<Type>,
-    given: &Arc<Type>,
-    printer: &mut Printer<'_>,
-) -> Option<String> {
-    // If the got type is `Result(a, _)` and the expected one is
-    // `a` then we can display the hint.
-    let wrapped_type = given.result_ok_type()?;
-    let expected = collapse_links(expected.clone());
-    if collapse_links(wrapped_type) != expected {
-        None
-    } else {
-        Some(wrap_format!(
-            "If you want to get a `{}` out of a `{}` you can pattern match on it:
-
-    case result {{
-      Ok(value) -> todo
-      Error(error) -> todo
-    }}",
-            printer.print_type(&expected),
-            printer.print_type(given),
-        ))
     }
 }
 

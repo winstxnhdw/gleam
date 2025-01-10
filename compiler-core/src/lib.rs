@@ -66,6 +66,7 @@ pub mod config;
 pub mod dependency;
 pub mod diagnostic;
 pub mod docs;
+pub mod encryption;
 pub mod erlang;
 pub mod error;
 pub mod fix;
@@ -106,7 +107,8 @@ mod schema_capnp {
         unused_qualifications,
         clippy::all,
         clippy::unwrap_used,
-        missing_debug_implementations
+        missing_debug_implementations,
+        missing_copy_implementations
     )]
     include!("../generated/schema_capnp.rs");
 }

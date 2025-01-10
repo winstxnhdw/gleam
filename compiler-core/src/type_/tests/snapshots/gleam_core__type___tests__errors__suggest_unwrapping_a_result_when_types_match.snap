@@ -26,11 +26,3 @@ Expected type:
 Found type:
 
     Result(Int, a)
-
-Hint: If you want to get a `Int` out of a `Result(Int, a)` you can pattern match
-on it:
-
-    case result {
-      Ok(value) -> todo
-      Error(error) -> todo
-    }

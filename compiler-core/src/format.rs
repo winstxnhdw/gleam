@@ -71,6 +71,30 @@ impl<'a> Intermediate<'a> {
     }
 }
 
+#[derive(Debug)]
+enum FnCapturePosition {
+    RightHandSideOfPipe,
+    EverywhereElse,
+}
+
+#[derive(Debug)]
+/// One of the pieces making a record update arg list: it could be the starting
+/// record being updated, or one of the subsequent arguments.
+///
+enum RecordUpdatePiece<'a> {
+    Record(&'a RecordBeingUpdated),
+    Argument(&'a UntypedRecordUpdateArg),
+}
+
+impl HasLocation for RecordUpdatePiece<'_> {
+    fn location(&self) -> SrcSpan {
+        match self {
+            RecordUpdatePiece::Record(record) => record.location,
+            RecordUpdatePiece::Argument(arg) => arg.location,
+        }
+    }
+}
+
 /// Hayleigh's bane
 #[derive(Debug, Clone, Default)]
 pub struct Formatter<'a> {
@@ -259,7 +283,7 @@ impl<'comments> Formatter<'comments> {
     fn imports<'a>(&mut self, imports: Vec<&'a TargetedDefinition>) -> Vec<Document<'a>> {
         let mut import_groups_docs = vec![];
         let mut current_group = vec![];
-        let mut current_group_delimiter = docvec!();
+        let mut current_group_delimiter = nil();
 
         for import in imports {
             let start = import.definition.location().start;
@@ -286,7 +310,7 @@ impl<'comments> Formatter<'comments> {
 
                 let comments = self.pop_comments(start);
                 let _ = self.pop_empty_lines(start);
-                current_group_delimiter = printed_comments(comments, true).unwrap_or(docvec!());
+                current_group_delimiter = printed_comments(comments, true).unwrap_or(nil());
             }
             // Lastly we add the import to the group.
             current_group.push(import);
@@ -546,7 +570,7 @@ impl<'comments> Formatter<'comments> {
         }
 
         let comma = match elements.first() {
-            // If the list is made of records and it gets too long we want to
+            // If the list is made of non-simple constants and it gets too long we want to
             // have each record on its own line instead of trying to fit as much
             // as possible in each line. For example:
             //
@@ -556,8 +580,8 @@ impl<'comments> Formatter<'comments> {
             //       Some("wobble wibble"),
             //    ]
             //
-            Some(Constant::Record { .. }) => break_(",", ", "),
-            // For all other items, if we have to break the list we still try to
+            Some(el) if !el.is_simple() => break_(",", ", "),
+            // For simple constants(String, Int, Float), if we have to break the list we still try to
             // fit as much as possible into a single line instead of putting
             // each item on its own separate line. For example:
             //
@@ -568,6 +592,7 @@ impl<'comments> Formatter<'comments> {
             //
             Some(_) | None => flex_break(",", ", "),
         };
+
         let elements = join(elements.iter().map(|e| self.const_expr(e)), comma);
 
         let doc = break_("[", "[").append(elements).nest(INDENT);
@@ -965,7 +990,9 @@ impl<'comments> Formatter<'comments> {
 
             UntypedExpr::NegateBool { value, .. } => self.negate_bool(value),
 
-            UntypedExpr::Fn { kind, body, .. } if kind.is_capture() => self.fn_capture(body),
+            UntypedExpr::Fn { kind, body, .. } if kind.is_capture() => {
+                self.fn_capture(body, FnCapturePosition::EverywhereElse)
+            }
 
             UntypedExpr::Fn {
                 return_annotation,
@@ -1056,7 +1083,7 @@ impl<'comments> Formatter<'comments> {
         match lines.as_slice() {
             [] | [_] => string.to_doc().surround("\"", "\""),
             [first_line, lines @ ..] => {
-                let mut doc = docvec!("\"", first_line);
+                let mut doc = docvec!["\"", first_line];
                 for line in lines {
                     doc = doc
                         .append(pretty::line().set_nesting(0))
@@ -1255,10 +1282,10 @@ impl<'comments> Formatter<'comments> {
     // resulting document will try to first split that before splitting all the
     // other arguments.
     // This is used for function calls and tuples.
-    fn append_inlinable_wrapped_args<'a, T, ToExpr, ToDoc>(
+    fn append_inlinable_wrapped_args<'a, 'b, T, ToExpr, ToDoc>(
         &mut self,
         doc: Document<'a>,
-        values: &'a [T],
+        values: &'b [T],
         location: &SrcSpan,
         to_expr: ToExpr,
         to_doc: ToDoc,
@@ -1266,7 +1293,7 @@ impl<'comments> Formatter<'comments> {
     where
         T: HasLocation,
         ToExpr: Fn(&T) -> &UntypedExpr,
-        ToDoc: Fn(&mut Self, &'a T) -> Document<'a>,
+        ToDoc: Fn(&mut Self, &'b T) -> Document<'a>,
     {
         match init_and_last(values) {
             Some((initial_values, last_value))
@@ -1326,8 +1353,8 @@ impl<'comments> Formatter<'comments> {
         // Otherwise those would be moved out of the case expression.
         let comments = self.pop_comments(location.end);
         let closing_bracket = match printed_comments(comments, false) {
-            None => docvec!(line(), "}"),
-            Some(comment) => docvec!(line(), comment)
+            None => docvec![line(), "}"],
+            Some(comment) => docvec![line(), comment]
                 .nest(INDENT)
                 .append(line())
                 .append("}"),
@@ -1346,18 +1373,27 @@ impl<'comments> Formatter<'comments> {
         args: &'a [UntypedRecordUpdateArg],
         location: &SrcSpan,
     ) -> Document<'a> {
-        use std::iter::once;
-        let constructor_doc = self.expr(constructor);
-        let comments = self.pop_comments(record.base.location().start);
-        let spread_doc = commented("..".to_doc().append(self.expr(&record.base)), comments);
-        let arg_docs = args
-            .iter()
-            .map(|a| self.record_update_arg(a).group())
+        let constructor_doc: Document<'a> = self.expr(constructor);
+        let pieces = std::iter::once(RecordUpdatePiece::Record(record))
+            .chain(args.iter().map(RecordUpdatePiece::Argument))
             .collect_vec();
-        let all_arg_docs = once(spread_doc).chain(arg_docs);
-        constructor_doc
-            .append(self.wrap_args(all_arg_docs, location.end))
-            .group()
+
+        self.append_inlinable_wrapped_args(
+            constructor_doc,
+            &pieces,
+            location,
+            |arg| match arg {
+                RecordUpdatePiece::Argument(arg) => &arg.value,
+                RecordUpdatePiece::Record(record) => record.base.as_ref(),
+            },
+            |this, arg| match arg {
+                RecordUpdatePiece::Argument(arg) => this.record_update_arg(arg),
+                RecordUpdatePiece::Record(record) => {
+                    let comments = this.pop_comments(record.base.location().start);
+                    commented("..".to_doc().append(this.expr(&record.base)), comments)
+                }
+            },
+        )
     }
 
     pub fn bin_op<'a>(
@@ -1458,15 +1494,8 @@ impl<'comments> Formatter<'comments> {
             let comments = self.pop_comments(expr.location().start);
             let doc = match expr {
                 UntypedExpr::Fn { kind, body, .. } if kind.is_capture() => {
-                    let body = match body.first() {
-                        Statement::Expression(expression) => expression,
-                        Statement::Assignment(_) | Statement::Use(_) => {
-                            unreachable!("Non expression capture body")
-                        }
-                    };
-                    self.pipe_capture_right_hand_side(body)
+                    self.fn_capture(body, FnCapturePosition::RightHandSideOfPipe)
                 }
-
                 _ => self.expr(expr),
             };
             let doc = if nest_pipe { doc.nest(INDENT) } else { doc };
@@ -1488,83 +1517,82 @@ impl<'comments> Formatter<'comments> {
         }
     }
 
-    fn pipe_capture_right_hand_side<'a>(&mut self, fun: &'a UntypedExpr) -> Document<'a> {
-        let (fun, args) = match fun {
-            UntypedExpr::Call {
-                fun,
-                arguments: args,
-                ..
-            } => (fun, args),
-            _ => panic!("Function capture found not to have a function call body when formatting"),
-        };
-
-        let hole_in_first_position = matches!(
-            args.first(),
-            Some(CallArg {
-                value: UntypedExpr::Var { name, .. },
-                ..
-            }) if name == CAPTURE_VARIABLE
-        );
-        let first_argument_is_labelled = args.first().is_some_and(|arg| arg.label.is_some());
-        let arity = args.len();
-
-        // If the first argument is labelled, we don't remove it as the label adds
-        // extra information and could be used to make code more readable.
-        if hole_in_first_position && args.len() == 1 && !first_argument_is_labelled {
-            // x |> fun(_)
-            self.expr(fun)
-        } else if hole_in_first_position && !first_argument_is_labelled {
-            // x |> fun(_, 2, 3)
-            let args = args
-                .iter()
-                .skip(1)
-                .map(|a| self.call_arg(a, arity))
-                .collect_vec();
-            self.expr(fun)
-                .append(self.wrap_args(args, fun.location().end).group())
-        } else {
-            // x |> fun(1, _, 3)
-            let args = args.iter().map(|a| self.call_arg(a, arity)).collect_vec();
-            self.expr(fun)
-                .append(self.wrap_args(args, fun.location().end).group())
-        }
-    }
-
-    fn fn_capture<'a>(&mut self, call: &'a [UntypedStatement]) -> Document<'a> {
+    fn fn_capture<'a>(
+        &mut self,
+        call: &'a [UntypedStatement],
+        position: FnCapturePosition,
+    ) -> Document<'a> {
         // The body of a capture being multiple statements shouldn't be possible...
         if call.len() != 1 {
             panic!("Function capture found not to have a single statement call");
         }
 
-        match call.first() {
-            Some(Statement::Expression(UntypedExpr::Call {
-                fun,
-                arguments: args,
-                location,
-                ..
-            })) => {
-                let arity = args.len();
-                match args.as_slice() {
-                    [first, second]
-                        if is_breakable_expr(&second.value) && first.is_capture_hole() =>
-                    {
-                        self.expr(fun)
-                            .append("(_, ")
-                            .append(self.call_arg(second, arity))
-                            .append(")")
-                            .group()
-                    }
+        let Some(Statement::Expression(UntypedExpr::Call {
+            fun,
+            arguments,
+            location,
+        })) = call.first()
+        else {
+            // The body of a capture being not a fn shouldn't be possible...
+            panic!("Function capture body found not to be a call in the formatter")
+        };
 
-                    _ => {
-                        let args = args.iter().map(|a| self.call_arg(a, arity)).collect_vec();
-                        self.expr(fun)
-                            .append(self.wrap_args(args, location.end).group())
-                    }
-                }
+        match (position, arguments.as_slice()) {
+            // The capture is on the right hand side of a pipe and it only has
+            // an unlabelled hole:
+            //
+            //     wibble |> wobble(_)
+            //
+            // We want it to become:
+            //
+            //     wibble |> wobble
+            //
+            (FnCapturePosition::RightHandSideOfPipe, [arg])
+                if arg.is_capture_hole() && arg.label.is_none() =>
+            {
+                self.expr(fun)
             }
 
-            // The body of a capture being not a fn shouldn't be possible...
-            _ => panic!("Function capture body found not to be a call in the formatter"),
+            // The capture is on the right hand side of a pipe and its first
+            // argument it an unlabelled capture hole:
+            //
+            //     wibble |> wobble(_, woo)
+            //
+            // We want it to become:
+            //
+            //     wibble |> wobble(woo)
+            //
+            (FnCapturePosition::RightHandSideOfPipe, [arg, rest @ ..])
+                if arg.is_capture_hole() && arg.label.is_none() =>
+            {
+                let expr = self.expr(fun);
+                let arity = rest.len();
+                self.append_inlinable_wrapped_args(
+                    expr,
+                    rest,
+                    location,
+                    |arg| &arg.value,
+                    |self_, arg| self_.call_arg(arg, arity),
+                )
+            }
+
+            // In all other cases we print it like a regular function call
+            // without changing it.
+            //
+            (
+                FnCapturePosition::RightHandSideOfPipe | FnCapturePosition::EverywhereElse,
+                arguments,
+            ) => {
+                let expr = self.expr(fun);
+                let arity = arguments.len();
+                self.append_inlinable_wrapped_args(
+                    expr,
+                    arguments,
+                    location,
+                    |arg| &arg.value,
+                    |self_, arg| self_.call_arg(arg, arity),
+                )
+            }
         }
     }
 
@@ -1789,7 +1817,8 @@ impl<'comments> Formatter<'comments> {
                     .as_str()
                     .to_doc()
                     .append(": ")
-                    .append(self.expr(&arg.value));
+                    .append(self.expr(&arg.value))
+                    .group();
 
                 if arg.value.is_binop() || arg.value.is_pipeline() {
                     commented(doc, comments).nest(INDENT)
@@ -2535,9 +2564,9 @@ impl<'comments> Formatter<'comments> {
         // Otherwise those would be moved out of the call.
         let comments = self.pop_comments(location.end);
         let closing_parens = match printed_comments(comments, false) {
-            None => docvec!(break_(",", ""), ")"),
+            None => docvec![break_(",", ""), ")"],
             Some(comment) => {
-                docvec!(break_(",", "").nest(INDENT), comment, line(), ")").force_break()
+                docvec![break_(",", "").nest(INDENT), comment, line(), ")"].force_break()
             }
         };
 
@@ -2915,19 +2944,6 @@ pub fn comments_before<'a>(
         popped,
         comments.get(end_comments..).expect("in bounds"),
         empty_lines.get(end_empty_lines..).expect("in bounds"),
-    )
-}
-
-fn is_breakable_expr(expr: &UntypedExpr) -> bool {
-    matches!(
-        expr,
-        UntypedExpr::Fn { .. }
-            | UntypedExpr::Block { .. }
-            | UntypedExpr::Call { .. }
-            | UntypedExpr::Case { .. }
-            | UntypedExpr::List { .. }
-            | UntypedExpr::Tuple { .. }
-            | UntypedExpr::BitArray { .. }
     )
 }
 
