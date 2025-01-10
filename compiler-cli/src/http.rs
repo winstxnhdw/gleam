@@ -54,10 +54,14 @@ fn init_client() -> Client {
     }
 }
 
-fn get_certificate() -> Result<Certificate, Box<dyn std::error::Error>> {
+fn get_certificate() -> Result<Certificate, Error> {
     let certificate_path = std::env::var("GLEAM_CACERTS_PATH")?;
     let certificate_bytes = std::fs::read(&certificate_path)?;
-    let certificate = Certificate::from_pem(&certificate_bytes)?;
 
-    Ok(certificate)
+    match Certificate::from_pem(&certificate_bytes) {
+        Ok(certificate) => Ok(certificate),
+        Err(e) => Error::CannotReadCertificate {
+            path: certificate_path,
+        },
+    }
 }

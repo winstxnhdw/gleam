@@ -310,6 +310,9 @@ file_names.iter().map(|x| x.as_str()).join(", "))]
         minimum_required_version: SmallVersion,
         wrongfully_allowed_version: SmallVersion,
     },
+
+    #[error("The certificate at {path} could not be read")]
+    CannotReadCertificate { path: String },
 }
 
 /// This is to make clippy happy and not make the error variant too big by
